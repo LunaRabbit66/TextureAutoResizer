@@ -1,4 +1,4 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEditor;
 using System.IO;
 using static TreeEditor.TextureAtlas;
@@ -70,39 +70,85 @@ public class TextureAutoResizer : EditorWindow
         int thresholdSize = textureSizes[thresholdIndex];
         int newSize = textureSizes[newSizeIndex];
 
-        Renderer[] renderers = targetObject.GetComponentsInChildren<Renderer>(true);
         int processedCount = 0;
 
-        foreach (Renderer renderer in renderers)
+        try
         {
-            foreach (Material mat in renderer.sharedMaterials)
+            // 対象オブジェクト配下の全ての GameObject/Component を収集
+            var objectsToScan = new System.Collections.Generic.List<Object>();
+            objectsToScan.Add(targetObject);
+            var allComponents = targetObject.GetComponentsInChildren<Component>(true);
+            objectsToScan.AddRange(allComponents);
+
+            // 依存関係から使用されている全アセットを取得
+            Object[] dependencies = EditorUtility.CollectDependencies(objectsToScan.ToArray());
+
+            // 重複パス排除のためのセット
+            var uniqueAssetPaths = new System.Collections.Generic.HashSet<string>();
+
+            foreach (var dep in dependencies)
             {
-                if (mat == null) continue;
+                if (dep == null) continue;
 
-                Shader shader = mat.shader;
-                int propertyCount = ShaderUtil.GetPropertyCount(shader);
-
-                for (int i = 0; i < propertyCount; i++)
+                try
                 {
-                    if (ShaderUtil.GetPropertyType(shader, i) == ShaderUtil.ShaderPropertyType.TexEnv)
-                    {
-                        string propName = ShaderUtil.GetPropertyName(shader, i);
-                        Texture tex = mat.GetTexture(propName);
-                        if (tex is Texture2D tex2D)
-                        {
-                            string assetPath = AssetDatabase.GetAssetPath(tex2D);
-                            TextureImporter importer = AssetImporter.GetAtPath(assetPath) as TextureImporter;
-                            if (importer != null && importer.maxTextureSize >= thresholdSize)
-                            {
-                                importer.maxTextureSize = newSize;
-                                importer.SaveAndReimport();
+                    Texture2D tex2D = null;
 
-                                processedCount++;
-                            }
+                    if (dep is Texture2D directTex)
+                    {
+                        tex2D = directTex;
+                    }
+                    else if (dep is Sprite sprite && sprite.texture != null)
+                    {
+                        // Sprite の元テクスチャも対象
+                        tex2D = sprite.texture;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    string assetPath = AssetDatabase.GetAssetPath(tex2D);
+                    if (string.IsNullOrEmpty(assetPath))
+                    {
+                        // ビルトイン/生成テクスチャ等はスキップ
+                        continue;
+                    }
+
+                    // 重複処理防止
+                    if (!uniqueAssetPaths.Add(assetPath)) continue;
+
+                    var importer = AssetImporter.GetAtPath(assetPath) as TextureImporter;
+                    if (importer == null)
+                    {
+                        // TextureImporter でない場合はスキップ（RenderTexture 等）
+                        continue;
+                    }
+
+                    // MaxSize がしきい値以上なら縮小
+                    if (importer.maxTextureSize >= thresholdSize)
+                    {
+                        importer.maxTextureSize = newSize;
+                        try
+                        {
+                            importer.SaveAndReimport();
+                            processedCount++;
+                        }
+                        catch (System.Exception reimportEx)
+                        {
+                            Debug.LogWarning($"[TextureAutoResizer] Reimport 失敗: {assetPath} -> {reimportEx.Message}");
                         }
                     }
                 }
+                catch (System.Exception perDepEx)
+                {
+                    Debug.LogWarning($"[TextureAutoResizer] 依存関係処理中に例外: {dep.name} ({dep.GetType().Name}) -> {perDepEx.Message}");
+                }
             }
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogError($"[TextureAutoResizer] 処理の初期化に失敗しました: {ex.Message}");
         }
 
         AssetDatabase.SaveAssets();
